@@ -1,0 +1,245 @@
+#!/bin/bash
+
+user_keys_root_path="$HOME/.ssh"
+
+status_enabled="enabled"
+status_disabled="disabled"
+
+# The filename that contains the public key
+pulic_target="key.pub"
+
+# The filename that contains the private key
+private_target="key"
+
+# The filename that disables the key
+# if the file exists in the key directory
+disabled_target="disabled"
+
+function log_error {
+    >&2 echo "$1"
+}
+
+function file_exists {
+    if [ -f "$1" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+function get_fullpath {
+    echo "$(dirname "$1")/$(basename "$1")"
+}
+
+function key_path_by_name {
+    echo "$(get_fullpath "$user_keys_root_path")/$1"
+}
+
+# Get the private key path
+function private_key_path {
+    echo "$(get_fullpath "$1")/"$private_target""
+}
+
+# Get the public key path
+function public_key_path {
+    echo "$(get_fullpath "$1")/"$public_target""
+}
+
+# Get the key disabled file path
+# NOTE: This is not the disabled key filepath, 
+#       but the path to the file that disables the key
+function disabled_keyfile_path {
+    echo "$(get_fullpath "$1")/"$disabled_target""
+}
+
+# Get the status of private key file path
+# exit with 0 if the file exists
+# and 1 if it does not
+function has_private_key {
+    if [ -f $(private_key_path "$1") ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Check if the key is disabled by checking
+# if the disabled file exists
+# in the key root directory
+function is_key_disabled {
+    if [ -f $(disabled_keyfile_path "$1") ]; then
+        echo "key disabled"
+        return 0
+    else
+        return 1
+    fi
+}
+
+function create_key {
+    keypath=$(key_path_by_name "$1")
+    private_key_filepath=$(private_key_path "$keypath")
+    if [ ! -d "$keypath" ]; then
+        mkdir -p "$keypath"
+    fi
+
+    if [ ! -f "$private_key_filepath" ]; then
+        ssh-keygen -t ed25519 -C "$1" -f "$private_key_filepath"
+        echo "Key [$1] created"
+        return 0
+    else
+        echo "Key [$1] already exists"
+        return 1
+    fi
+}
+
+function enable_key {
+    keypath=$(key_path_by_name "$1")
+    if [ -f $(disabled_keyfile_path "$keypath") ]; then
+        rm $(disabled_keyfile_path "$keypath")
+        echo "Key [$1] $status_enabled"
+        return 0
+    fi
+    return 1
+}
+
+function disable_key {
+    keypath=$(key_path_by_name "$1")
+    if [ ! -f $(disabled_keyfile_path "$keypath") ]; then
+        touch $(disabled_keyfile_path "$keypath")
+        echo "Key [$1] $status_disabled"
+        return 0
+    fi
+    return 1
+}
+
+function add_key {
+    keypath=$(key_path_by_name "$1")
+    add_ssh_agent_private_key "$keypath"
+}
+
+function forget_key {
+    keypath=$(private_key_path "$(key_path_by_name "$1")")
+    if [ -f $keypath ]; then
+        ssh-add -d "$keypath"
+    fi
+}
+
+function destroy_key {
+    echo "$(key_path_by_name "$1")"
+}
+
+# Check if the provided directory exists
+function add_ssh_agent_private_key {
+    key_name=$(basename "$1")
+    key_path=$(private_key_path "$1")
+
+    if [ -f "$key_path" ]; then
+        out="$(ssh-add "$key_path")"
+        if [[ "$?" -eq 0 ]]; then
+            return 0
+        else
+            log_error "Error: Failed to add [$key_name] at $key_path"
+            log_error "$out"
+        fi
+    else
+        echo "Error: Private key [$key_name] not found at $key_path"
+    fi
+    return 1
+}
+
+# Add all the private keys in the directory
+function add_private_keys {
+    for dir in "$1"/*; do
+        path="$(get_fullpath "$dir")"
+        key_name=$(basename "$path")
+
+        # Check if the path is a directory, has a private key and is not disabled
+        if [ -d "$path" ] && [[ "$(has_private_key "$path" > /dev/null)$?" -eq "0" ]]; then
+
+            # Check if the key is disabled
+            disabled="$(is_key_disabled "$path" > /dev/null)$?"
+            if [[ "$disabled" -eq "1" ]]; then
+                add_ssh_agent_private_key "$path"
+            fi
+        fi
+    done
+}
+
+# Check if ssh root keys directory exists
+function assert_dir_is_key_root {
+    if [ ! -d "$1" ]; then
+        log_error "Error: SSH target at $keys is not an ssh keys directory"
+        exit 1
+    fi
+}
+
+
+
+
+# Function to display the usage instructions
+function show_help {
+    echo "Usage: $0 [-e|--enable] [-d|--disable] [-a|--add] [-r|--remove] [-D|--destroy] [-h|--help]"
+    echo "  -e, --enable    Enable the key for use in the ssh agent"
+    echo "  -d, --disable   Disable the key from being used in the ssh agent"
+    echo "  -a, --add       add the key to the ssh agent"
+    echo "  -f, --forget    remove the key from the current running ssh agent"
+    echo "  -D, --destroy   delete the key from filesystem"
+    echo "  -h, --help      Display this help message"
+}
+
+function parse_args {
+    while getopts "c:e:d:a:f:h:D:" opt; do
+        case $opt in
+            e)
+                enable_key $OPTARG
+                exit 0
+                ;;
+            d)
+                disable_key $OPTARG
+                exit 0
+                ;;
+            a)
+                add_key $OPTARG
+                exit 0
+                ;;
+            f)
+                forget_key $OPTARG
+                exit 0
+                ;;
+            c)
+                create_key $OPTARG
+                exit 0
+                ;;
+            D)
+                destroy_key $OPTARG
+                exit 0
+                ;;
+            h)
+                show_help
+                exit 0
+                ;;
+            \?)
+                echo "Invalid option: -$OPTARG" >&2
+                show_help
+                exit 1
+                ;;
+            :)
+                echo "Option -$OPTARG requires an argument." >&2
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# @TODO: Add a function to parse long options
+
+
+assert_dir_is_key_root $user_keys_root_path
+
+if [ -z "$1" ]; then
+    add_private_keys $user_keys_root_path
+else
+    parse_args $@
+fi
+
